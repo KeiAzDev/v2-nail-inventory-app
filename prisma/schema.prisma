@@ -1,0 +1,325 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mongodb"
+  url      = env("DATABASE_URL")
+}
+
+enum Type {
+  POLISH_COLOR
+  POLISH_BASE
+  POLISH_TOP
+
+  GEL_COLOR
+  GEL_BASE
+  GEL_TOP
+  GEL_REMOVER
+
+  NAIL_CARE
+  TOOL
+  CONSUMABLE
+  SANITIZATION
+  STORE_SUPPLY
+}
+
+enum NailLength {
+  SHORT
+  MEDIUM
+  LONG
+}
+
+// 業務に即したロール設計
+enum Role {
+  OWNER             // サロンのオーナー（全権限）
+  NAIL_TECHNICIAN   // ネイルテクニシャン（施術、在庫使用記録）
+  RECEPTIONIST      // 受付（予約管理、在庫閲覧のみ）
+  TRAINEE           // 研修生（限定的な権限）
+}
+
+model Store {
+  id            String    @id @default(auto()) @map("_id") @db.ObjectId
+  name          String
+  code          String    @unique
+  address       String?   
+  phone         String?   
+  adminEmail    String    @unique
+  products      Product[]
+  users         User[]    
+  serviceTypes  ServiceType[]
+  invitations   Invitation[]
+  maxStoreConnections    Int          @default(50)  // 店舗全体の最大同時接続数
+  maxUserConnections     Int          @default(5)   // ユーザーごとの最大同時接続数
+  sessions              UserSession[]
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  
+  // Stripe関連フィールド（将来実装）
+  stripeCustomerId  String?   // StripeのカスタマーID
+  subscriptionId    String?   // 現在のサブスクリプションID
+  subscriptionStatus String?  // active, trialing, past_due, canceled等
+  subscriptionTier  String?   // free, basic, premium等
+  trialEndsAt       DateTime?
+}
+
+model User {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  email       String    @unique
+  password    String
+  name        String
+  role        Role      @default(TRAINEE)  // デフォルトを研修生に変更
+  storeId     String    @db.ObjectId
+  store       Store     @relation(fields: [storeId], references: [id])
+  isDeleted   Boolean   @default(false)
+  deletedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  image       String?
+  phone       String?
+  shifts      Json? 
+  area        String?
+  activities  Activity[]
+
+  sessions     UserSession[]
+  lastLogin    DateTime?
+  loginCount   Int       @default(0)
+}
+
+model UserSession {
+  id            String    @id @default(auto()) @map("_id") @db.ObjectId
+  user          User      @relation(fields: [userId], references: [id])
+  userId        String    @db.ObjectId
+  store         Store     @relation(fields: [storeId], references: [id])
+  storeId       String    @db.ObjectId
+  
+  // セッション管理
+  token         String    @unique
+  isActive      Boolean   @default(true)
+  lastActivity  DateTime  @updatedAt
+  expiresAt     DateTime
+  
+  // デバイス情報
+  device        String?   // デバイスの種類（PC, Mobile等）
+  browser       String?   // ブラウザ情報
+  ipAddress     String?   // IPアドレス
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@index([userId, isActive])
+  @@index([storeId, isActive])
+  @@index([token, isActive])
+}
+
+model Activity {
+  id        String   @id @default(auto()) @map("_id") @db.ObjectId
+  userId    String   @db.ObjectId
+  user      User     @relation(fields: [userId], references: [id])
+  type      String   // LOGIN, LOGOUT, INVENTORY, STAFF_MANAGE など
+  action    String   
+  metadata  Json?    // 任意の追加情報
+  createdAt DateTime @default(now())
+}
+
+model Product {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  brand       String
+  productName String
+  colorCode   String
+  colorName   String
+  opacity     Float     @default(1)  // 透明度（0-1）
+  type        Type
+  price       Float
+
+  isLiquid    Boolean   @default(true)  // 液体商品かどうか（残量ゲージ表示に影響）
+  useColorPicker Boolean @default(true) // カラーピッカーを使用するかどうか
+  
+  // 容量関連フィールド
+  capacity         Float?    
+  capacityUnit     String?  
+  averageUsePerService Float?
+  
+  // ロット管理用のフィールド
+  totalQuantity    Int       @default(1)    // 総在庫数
+  inUseQuantity    Int       @default(0)    // 使用中の数
+  lotQuantity      Int       @default(1)    // 未使用のロット数
+  
+  // 使用中商品の管理用のフィールド
+  currentProductLots ProductLot[]   // 使用中と未使用の商品ロット
+  
+  // アラート関連
+  recommendedAlertPercentage Int    @default(20)
+  minStockAlert    Int       @default(5)
+  
+  // 使用記録関連フィールド
+  usageCount       Int       @default(0)
+  lastUsed         DateTime?
+  averageUsesPerMonth Float?
+  estimatedDaysLeft  Int?
+  usages           Usage[]
+  relatedUsages    RelatedProductUsage[]
+  serviceTypeProducts ServiceTypeProduct[]
+  store            Store     @relation(fields: [storeId], references: [id])
+  storeId          String    @db.ObjectId
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+}
+
+model ProductLot {
+  id            String    @id @default(auto()) @map("_id") @db.ObjectId
+  product       Product   @relation(fields: [productId], references: [id])
+  productId     String    @db.ObjectId
+  
+  isInUse       Boolean   @default(false)  // 使用中かどうか
+  currentAmount Float?                      // 現在の残量（使用中の場合のみ）
+  startedAt     DateTime? // 使用開始日
+
+  // 使用記録との関連
+  usages        Usage[]              // メイン使用記録
+  relatedUsages RelatedProductUsage[] // 関連使用記録
+  
+  createdAt     DateTime  @default(now())  // ロット追加日
+  updatedAt     DateTime  @updatedAt
+}
+
+model ServiceType {
+  id              String    @id @default(auto()) @map("_id") @db.ObjectId
+  name            String
+  defaultUsageAmount Float
+  productType     Type
+
+  // ジェル施術のための追加フィールド
+  isGelService    Boolean   @default(false)
+  requiresBase    Boolean   @default(false)
+  requiresTop     Boolean   @default(false)
+  
+  // 爪の長さごとの使用量調整係数
+  shortLengthRate   Int     @default(80)
+  mediumLengthRate  Int     @default(100)
+  longLengthRate    Int     @default(130)
+  
+  allowCustomAmount Boolean @default(false)
+  
+  // リレーション
+  serviceTypeProducts ServiceTypeProduct[] // 中間テーブルへの参照
+  usages          Usage[]
+  store           Store     @relation(fields: [storeId], references: [id])
+  storeId         String    @db.ObjectId
+
+  designVariant     String?   // "BASIC", "FRENCH", "ART"
+  designUsageRate   Float?    // デザインによる使用量調整率
+  monthlyStats      MonthlyServiceStat[]
+  
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@unique([name, storeId])
+}
+
+model ServiceTypeProduct {
+  id            String    @id @default(auto()) @map("_id") @db.ObjectId
+  serviceType   ServiceType @relation(fields: [serviceTypeId], references: [id])
+  serviceTypeId String    @db.ObjectId
+  product       Product   @relation(fields: [productId], references: [id])
+  productId     String    @db.ObjectId
+  usageAmount   Float
+  isRequired    Boolean   @default(true)
+  productRole   String?   // "BASE", "COLOR", "TOP" などの役割を指定
+  order         Int       @default(0)  // 使用順序
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  @@unique([serviceTypeId, productId])
+}
+
+model Usage {
+  id            String    @id @default(auto()) @map("_id") @db.ObjectId
+  date          DateTime
+  usageAmount   Float
+  defaultAmount Float?
+  nailLength    NailLength
+  isCustomAmount Boolean  @default(false)
+  isGelService  Boolean   @default(false)  // ジェル施術かどうか
+  
+  relatedUsages RelatedProductUsage[]
+  serviceType   ServiceType @relation(fields: [serviceTypeId], references: [id])
+  serviceTypeId String     @db.ObjectId
+  product       Product    @relation(fields: [productId], references: [id])
+  productId     String     @db.ObjectId
+  adjustmentReason String?
+
+   // 使用したロットへの参照
+  usedLot      ProductLot? @relation(fields: [usedLotId], references: [id])
+  usedLotId    String?    @db.ObjectId
+  
+  note          String?
+  createdAt     DateTime   @default(now())
+}
+
+model RelatedProductUsage {
+  id            String    @id @default(auto()) @map("_id") @db.ObjectId
+  usage         Usage     @relation(fields: [usageId], references: [id])
+  usageId       String    @db.ObjectId
+  product       Product   @relation(fields: [productId], references: [id])
+  productId     String    @db.ObjectId
+  amount        Float
+  defaultAmount Float?
+  isCustomAmount Boolean  @default(false)
+
+  // 使用順序と役割
+  order         Int       @default(0)
+  role          String?   // "BASE", "COLOR", "TOP"
+  
+  // 使用したロットへの参照
+  usedLot      ProductLot? @relation(fields: [usedLotId], references: [id])
+  usedLotId    String?    @db.ObjectId
+  
+  createdAt     DateTime  @default(now())
+}
+
+model Invitation {
+  id          String    @id @default(auto()) @map("_id") @db.ObjectId
+  token       String    @unique
+  email       String?
+  storeId     String    @db.ObjectId
+  store       Store     @relation(fields: [storeId], references: [id])
+  role        Role      @default(TRAINEE)  // デフォルトを研修生に変更
+  expires     DateTime
+  used        Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+// 月間統計モデル
+model MonthlyServiceStat {
+  id            String    @id @default(auto()) @map("_id") @db.ObjectId
+  serviceType   ServiceType @relation(fields: [serviceTypeId], references: [id])
+  serviceTypeId String    @db.ObjectId
+  month         Int
+  year          Int
+  totalUsage    Float
+  averageUsage  Float
+  usageCount    Int
+  temperature   Float?
+  humidity      Float?
+  seasonalRate  Float?    // 実績に基づく季節係数
+
+  // 分析データ
+  designUsageStats   Json?    // デザインタイプ別使用量集計 
+  predictedUsage     Float?   // 予測使用量
+  actualDeviation    Float?   // 予測との差分
+  averageTimePerUse  Float?   // 平均使用時間
+  
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  @@unique([serviceTypeId, year, month], name: "monthlyStatIdentifier")
+}
